@@ -1,0 +1,187 @@
+import sys
+from typing import Any
+import numpy as np
+import pickle
+from scipy import interpolate
+from scipy.optimize import curve_fit
+
+import matplotlib.pyplot as plt
+import myplot  # provide 2 functions defining the width and height of a plot.
+
+'''
+myplot.set_size_horizontal(width, fraction=1, subplots=(1, 1))
+myplot.set_size_vertical(width, fraction=1, subplots=(1, 1))
+'''
+
+
+# plt.style.use('tex')
+# plt.rcParams['text.usetex'] = True
+
+
+def py2png(fname, X, Z, W0, W1, step, zCenter, xCenterFit, width):
+    xMesh, zMesh = np.meshgrid(X, Z)
+    # width = 384
+    # fig, ax = plt.subplots(1, 1, figsize=myplot.set_size_vertical(width, subplots=(1, 1)),
+    #                      constrained_layout=True,sharex=True, sharey=False)
+    fig, ax = plt.subplots(1, 2, sharex=True, sharey=True)
+    # left, bottom, width, height = 0.1, 0.1, 0.8, 0.8
+    # ax = fig.add_axes([left, bottom, width, height])
+    ax[0].set(xlim=[-3, 3], ylim=[-3, 10])
+    ax[0].set_aspect('equal')  # 'equal'
+    ax[1].set_aspect('equal')
+    levels = np.linspace(-0.5, 0, 51, endpoint=True)
+    contour = ax[0].contourf(xMesh, zMesh, W0, levels, cmap='Blues', extend='both')
+    ax[1].contourf(xMesh, zMesh, W1, levels, cmap='Blues', extend='both')
+    # ax[0].set_title('gamma = 0')
+    # ax[1].set_title('filtered')
+    # ax[0].plot(xCenterFit,zCenter,'r--')
+
+    #width = width*np.sqrt(2*np.log(2))
+    ax[0].plot(xCenterFit + width, zCenter, 'r:')
+    ax[0].plot(xCenterFit - width, zCenter, 'r:')
+    # ax[0].plot(xCenter_weight,zCenter,'y--')
+    plt.suptitle('Step = {:d} velocity deficit'.format(step))
+    plt.colorbar(contour, ax=ax)
+    fig.savefig(fname, transparent=False, bbox_inches="tight")
+    plt.pause(3)
+    plt.close()
+
+
+def fitStreamwiseAndSaveToFile(case1, case2):  # 水平方向的蜿蜒判定
+    outputFrequency = 1000  # 绘图频率
+    inflowFileSize = 1000  # 来流文件格式
+    Nx = 97
+    Ny = 136
+    Nz = 193
+
+    numberOfComponents = 3  # 对应U V W三个速度分量
+
+    steps = np.arange(1, 26000, 1)
+    steps = np.delete(steps, np.arange(199, steps.size, 200))
+    coordinates = np.loadtxt("D:/LYL/wake/1.4uniform/xyz.dat", skiprows=1)
+
+    X = coordinates[:Nx, 0] / 0.25
+    Y = (coordinates[Nx:Nx + Ny, 1] - 0.25) / 0.25
+    Z = (coordinates[Nx + Ny:Nx + Ny + Nz, 2]) / 0.25 - 3  # 选取位置
+
+    zPosition = np.arange(48, 156, 12)  # streamwise positions
+    zFit = Z[48:144]  # 90 1D, 250, 9D
+
+    folder = "D:/LYL/wake/2.8uniform/plane_j0045".format(case1)
+    folder2 = "D:/LYL/wake/2.8uniform/NoT/plane_j0045".format(case2)
+    np.savetxt(folder + 'zFit.dat', zFit, header='This file contains the z coordinates of the wake centers')
+
+    fittedWakeCenterData = np.zeros([steps.shape[0], zFit.shape[0]])
+
+    for index in np.arange(steps.shape[0]):
+        step = steps[index]
+        stepInFile = (index + 1) % inflowFileSize
+        if 1 == stepInFile:
+            fileName0 = folder + "jsection_{0:06d}_dt=0.002.dat".format(step)
+            fileName2 = folder2 + "jsection_{0:06d}_dt=0.002.dat".format(step)
+
+            print(fileName0)
+            data0 = np.memmap(fileName0, dtype=np.float64, mode='r',
+                              shape=(inflowFileSize, Nz + 1, Nx + 1, numberOfComponents))  # shape是阵列所需形状
+            W0 = (data0[stepInFile - 1, :Nz, :-1, 2])  # Nz流向
+            try:
+                data2 = np.memmap(fileName2, dtype=np.float64, mode='r',
+                                  shape=(inflowFileSize, Nz + 1, Nx + 1, numberOfComponents))
+                W2 = (data2[stepInFile - 1, :Nz, :-1, 2])
+            except:
+                W2 = 1
+
+        dW0 = W0 - W2  # 计算速度亏损
+        dW0[dW0 > 0] = 0  # 加速区域速度的赋值0
+
+        xFit = X[49 - 18:49 + 18]
+        wakeCenter_fitted = np.zeros(zFit.shape)  # .shape是属性不加()
+
+        for i in np.arange(zFit.shape[0]):  # .shape[0]输入zFit的行数
+            nz = i + 48
+            averageDeficit = dW0[nz, :]
+            centralDeficit = averageDeficit[49 - 18:49 + 18]
+            centralDeficit_sq = np.square(centralDeficit)
+            yc = np.inner(xFit, centralDeficit_sq) / np.sum(centralDeficit)  # np.inner向量内积
+            wakeCenter_fitted[i] = yc
+
+        fittedWakeCenterData[index, :] = wakeCenter_fitted
+
+        print(step)
+        if 1 == step % outputFrequency:
+            py2png(folder + "weightCenter_{:d}".format(step), X, Z, dW0, dW0, step, zFit, wakeCenter_fitted, 0.5)
+
+    pickle.dump(fittedWakeCenterData, open(folder + "fittedWakeCenterData_WeightCenter_5.pkl", "wb"))
+
+
+
+def fitStreamwiseAndSaveToFile_islice(case1, case2):  # 垂直方向的蜿蜒判定
+    outputFrequency = 1000
+    inflowFileSize = 1000
+    Nx = 97
+    Ny = 136
+    Nz = 193
+    # NzLarger = 421
+    numberOfComponents = 3
+
+    steps = np.arange(1, 26000, 1)
+
+    coordinates = np.loadtxt("D:/LYL/wake/1.4uniform/xyz.dat", skiprows=1)
+
+    X = coordinates[:Nx, 0] / 0.25 - 4
+    Y = (coordinates[Nx:Nx + Ny, 1] - 0.25) / 0.25
+    Z = (coordinates[Nx + Ny:Nx + Ny + Nz, 2]) / 0.25 - 3  # 选取位置
+
+    zPosition = np.arange(48, 180, 12)  # streamwise positions 流向位置
+    zFit = Z[48:168]  # 49 1D, 193, 12D 1-12D坐标位置
+
+    folder = "D:/LYL/wake/falt/plane_j0045/".format(case1)
+    folder2 = "D:/LYL/wake/falt/NoT/plane_j0045/".format(case2)
+    np.savetxt(folder + 'zFit.dat', zFit, header='This file contains the z coordinates of the wake centers')
+
+    fittedWakeCenterData = np.zeros([steps.shape[0], zFit.shape[0]])
+
+    for index in np.arange(steps.shape[0]):
+        step = steps[index]
+        stepInFile = (index + 1) % inflowFileSize
+        if 1 == stepInFile:
+            fileName0 = folder + "jsection_{0:06d}_dt=0.002.dat".format(step)
+            fileName2 = folder2 + "jsection_{0:06d}_dt=0.002.dat".format(step)
+
+            print(fileName0)
+            data0 = np.memmap(fileName0, dtype=np.float64, mode='r',
+                              shape=(inflowFileSize, Nz + 1, Nx + 1, numberOfComponents))
+            W0 = (data0[stepInFile - 1, :Nz, :-1, 2])
+            try:
+                data2 = np.memmap(fileName2, dtype=np.float64, mode='r',
+                                  shape=(inflowFileSize, Nz + 1, Nx + 1, numberOfComponents))
+                W2 = (data2[stepInFile - 1, :Nz, :-1, 2])
+            except:
+                W2 = 1
+        dW0 = W0 - W2
+        dW0[dW0 > 0] = 0
+
+        xFit = X[49 - 24:49 + 24]
+        np.savetxt(folder + 'xFit.dat', xFit, header='This file contains the x coordinates of the wake centers')
+        wakeCenter_fitted = np.zeros(zFit.shape)
+
+        for i in np.arange(zFit.shape[0]):
+            # averageDeficit = np.average(dW0[nz:nz,:],axis=0)
+            nz = i + 48
+            averageDeficit = dW0[nz, :]
+            centralDeficit = averageDeficit[49 - 24:49 + 24]
+            centralDeficit_square = np.square(centralDeficit)
+            yc = np.inner(xFit, centralDeficit_square) / np.sum(centralDeficit_square)  # np.inner向量内积
+            wakeCenter_fitted[i] = yc
+
+        fittedWakeCenterData[index, :] = wakeCenter_fitted
+
+        print(step)
+        if 1 == step % outputFrequency:
+            py2png(folder + "weightCenter_{:d}".format(step), X, Z, dW0, dW0, step, zFit, wakeCenter_fitted, 0.5)
+
+    pickle.dump(fittedWakeCenterData, open(folder + "fittedWakeCenterData_WeightCenter_5.pkl", "wb"))
+
+
+if __name__ == '__main__':
+    fitStreamwiseAndSaveToFile_islice('fixed', 'uniform')
